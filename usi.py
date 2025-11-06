@@ -155,7 +155,7 @@ def svm_predict_hog_batch(images_rgb):
         probs.append(svm_model.predict_proba(feat)[0])
     return np.array(probs)
 
-st.title("🧠 MRI Brain Tumor Classification — CNN + RF + SVM with Explainability")
+st.title("🧠 MRI Brain Tumor Classification with Explainability")
 st.write("Upload an MRI image to classify and visualize explanations for each model.")
 
 uploaded = st.file_uploader("Upload an image", type=["jpg", "jpeg", "png"])
