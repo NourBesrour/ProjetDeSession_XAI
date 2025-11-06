@@ -88,6 +88,7 @@ def sample_background_images(n=50):
     return imgs
 
 BG_IMAGES = sample_background_images(50)
+
 def make_gradcam_heatmap_cnn(model, img_array, last_conv_layer_name=None, pred_index=None):
     if not model.built:
         dummy_input = np.zeros_like(img_array)
@@ -104,8 +105,6 @@ def make_gradcam_heatmap_cnn(model, img_array, last_conv_layer_name=None, pred_i
     )
     with tf.GradientTape() as tape:
         conv_outputs, predictions = grad_model(img_array)
-
-
         tape.watch(conv_outputs)
         if pred_index is None:
             pred_index = tf.argmax(predictions[0])
@@ -155,6 +154,7 @@ def svm_predict_hog_batch(images_rgb):
         probs.append(svm_model.predict_proba(feat)[0])
     return np.array(probs)
 
+# --- Streamlit UI ---
 st.title("🧠 MRI Brain Tumor Classification with Explainability")
 st.write("Upload an MRI image to classify and visualize explanations for each model.")
 
@@ -168,6 +168,7 @@ img_rgb = np.array(pil_img)
 img_bgr = cv2.cvtColor(img_rgb, cv2.COLOR_RGB2BGR)
 st.image(pil_img, caption="Input Image", use_column_width=True)
 
+# --- Model Predictions ---
 cnn_input = preprocess_for_cnn(img_bgr)[None, ...]
 cnn_probs = cnn_model.predict(cnn_input, verbose=0)[0]
 cnn_pred = int(np.argmax(cnn_probs))
@@ -187,7 +188,7 @@ else:
     svm_pred = int(svm_model.predict(svm_feat))
     svm_conf = None
 
-# Display individual model results
+# --- Display individual model results ---
 col1, col2, col3 = st.columns(3)
 with col1:
     st.markdown("### CNN")
@@ -201,34 +202,42 @@ with col3:
 
 st.markdown("---")
 
+# --- Final Decision Logic ---
 predictions = [cnn_pred, rf_pred]
+confidences = [cnn_conf, rf_conf]
 if svm_conf is not None:
     predictions.append(svm_pred)
-    
-winning_pred_index = None
-if len(predictions) > 0:
-    from collections import Counter
-    vote_counts = Counter(predictions)
-    final_pred_index = vote_counts.most_common(1)[0][0]
-    winning_models = [
-        "CNN" if cnn_pred == final_pred_index else None,
-        "Random Forest" if rf_pred == final_pred_index else None
-    ]
-    if svm_conf is not None:
-        winning_models.append("SVM" if svm_pred == final_pred_index else None)
-    
-    winning_models = [m for m in winning_models if m is not None]
-    
-    st.subheader(f"🧠 Final Consensus Prediction: **{CLASS_NAMES[final_pred_index]}**")
-    st.success(f"The model consensus is **{CLASS_NAMES[final_pred_index]}** (Votes: {vote_counts[final_pred_index]} of {len(predictions)}). Winning models: {', '.join(winning_models)}")
-    
-    winning_pred_index = final_pred_index
+    confidences.append(svm_conf)
+
+from collections import Counter
+vote_counts = Counter(predictions)
+most_common = vote_counts.most_common()
+max_votes = most_common[0][1]
+
+# Check if tie
+top_candidates = [cls for cls, count in most_common if count == max_votes]
+if len(top_candidates) == 1:
+    final_pred_index = top_candidates[0]
+else:
+    # Tie → choose class with highest average confidence
+    avg_conf = {}
+    for cls in top_candidates:
+        avg_conf[cls] = np.mean([conf for pred, conf in zip(predictions, confidences) if pred == cls])
+    final_pred_index = max(avg_conf, key=avg_conf.get)
+
+winning_models = [m for m, pred in zip(["CNN","RF","SVM"], [cnn_pred, rf_pred, svm_pred if svm_conf else None]) if pred == final_pred_index]
+
+st.subheader(f"🧠 Final Decision: **{CLASS_NAMES[final_pred_index]}**")
+st.success(f"Décision finale prise (Votes: {vote_counts[final_pred_index]} de {len(predictions)}). Modèles alignés : {', '.join(winning_models)}")
+
+winning_pred_index = final_pred_index
 
 st.markdown("---")
 
-st.subheader("✨ Explainability for Consensus Model(s)")
+# --- Explainability for models that match final decision ---
+st.subheader("✨ Explainability for Final Decision")
 
-if winning_pred_index is not None and cnn_pred == winning_pred_index:
+if cnn_pred == winning_pred_index:
     st.markdown("### 1️⃣ CNN — Grad-CAM")
     heatmap = make_gradcam_heatmap_cnn(cnn_model, cnn_input)
     overlay = overlay_heatmap_on_image(img_bgr, heatmap)
@@ -244,38 +253,23 @@ if winning_pred_index is not None and cnn_pred == winning_pred_index:
     
     st.markdown("---")
 
-if winning_pred_index is not None and rf_pred == winning_pred_index:
+if rf_pred == winning_pred_index:
     st.markdown("### 2️⃣ Random Forest — SHAP")
     rf_shap_vals = rf_explainer.shap_values(rf_feat)
-
     if isinstance(rf_shap_vals, list):
-        if rf_pred < len(rf_shap_vals):
-            shap_values_for_pred = rf_shap_vals[rf_pred]
-        else:
-            st.warning(f"RF SHAP output size is ambiguous. Using the only available index [0].")
-            shap_values_for_pred = rf_shap_vals[0]
+        shap_values_for_pred = rf_shap_vals[rf_pred] if rf_pred < len(rf_shap_vals) else rf_shap_vals[0]
     else:
         shap_values_for_pred = rf_shap_vals
         
     if shap_values_for_pred.ndim > 1:
         shap_values_for_pred = shap_values_for_pred.flatten()
-    if shap_values_for_pred.size == 10000:
-        SHAP_VIS_SIZE = (100, 100)
-    else:
-        SHAP_VIS_SIZE = (CNN_IMG_SIZE[1], CNN_IMG_SIZE[0])
-
+    SHAP_VIS_SIZE = (100, 100) if shap_values_for_pred.size == 10000 else (CNN_IMG_SIZE[1], CNN_IMG_SIZE[0])
     shap_img = shap_values_for_pred.reshape(SHAP_VIS_SIZE)
-
-    if SHAP_VIS_SIZE != (CNN_IMG_SIZE[1], CNN_IMG_SIZE[0]):
-        shap_img_resized = cv2.resize(shap_img, CNN_IMG_SIZE, interpolation=cv2.INTER_LINEAR)
-    else:
-        shap_img_resized = shap_img
-
+    shap_img_resized = cv2.resize(shap_img, CNN_IMG_SIZE, interpolation=cv2.INTER_LINEAR)
     shap_norm = (shap_img_resized - np.min(shap_img_resized)) / (np.ptp(shap_img_resized) + 1e-6)
     color = cv2.applyColorMap(np.uint8(255 * shap_norm), cv2.COLORMAP_JET)
     overlay = cv2.addWeighted(cv2.resize(img_bgr, CNN_IMG_SIZE), 0.6, color, 0.4, 0)
-    st.image(cv2.cvtColor(overlay, cv2.COLOR_BGR2RGB), use_column_width=True,caption=f"RF SHAP Overlay — {CLASS_NAMES[rf_pred]}")
-
+    st.image(cv2.cvtColor(overlay, cv2.COLOR_BGR2RGB), use_column_width=True, caption=f"RF SHAP Overlay — {CLASS_NAMES[rf_pred]}")
 
     fig_rf, ax_rf = plt.subplots()
     ax_rf.imshow(shap_norm, cmap="seismic")
@@ -284,8 +278,7 @@ if winning_pred_index is not None and rf_pred == winning_pred_index:
     
     st.markdown("---")
 
-
-if winning_pred_index is not None and svm_conf is not None and svm_pred == winning_pred_index:
+if svm_conf is not None and svm_pred == winning_pred_index:
     st.markdown("### 3️⃣ SVM — LIME (on HOG features)")
     lime_exp = lime_image.LimeImageExplainer()
     with st.spinner("Computing LIME explanation..."):
@@ -304,12 +297,6 @@ if winning_pred_index is not None and svm_conf is not None and svm_pred == winni
         hide_rest=False
     )
     temp_display = (temp * 255).astype(np.uint8)
-
     st.image(temp_display, caption=f"LIME — {CLASS_NAMES[svm_pred]}", use_column_width=True)
 
-    
-
-if winning_pred_index is None or (cnn_pred != winning_pred_index and rf_pred != winning_pred_index and (svm_conf is None or svm_pred != winning_pred_index)):
-    st.info("No explainability visuals are displayed because no model achieved the final consensus prediction.")
-
-st.success("✅ Done — The interface is fully operational, displaying predictions and conditional explanations.")
+st.success("✅ Done — Predictions and explainability visualizations are displayed successfully.")
